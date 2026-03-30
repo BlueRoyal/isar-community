@@ -1,4 +1,5 @@
 name: isar_community_web
+publish_to: none
 description: >
   Web support for isar_community. Provides pre-built WASM binaries
   that enable SQLite-backed Isar in Flutter Web applications.
