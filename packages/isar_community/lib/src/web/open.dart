@@ -18,33 +18,32 @@ bool _wasmLoaded = false;
 Future<void> initializeIsarWeb([String? wasmUrl]) async {
   if (_wasmLoaded) return;
 
-  final url = wasmUrl ?? 'isar_wasm.js';
+  // Wait for sql.js to be ready (Promise stored on window by index.html)
+  final readyPromise = js_util.getProperty(window, '_isarReady');
+  if (readyPromise != null) {
+    await js_util.promiseToFuture(readyPromise);
+  } else {
+    // Fallback: wait briefly for scripts loaded in index.html
+    for (var i = 0; i < 100; i++) {
+      if (js_util.hasProperty(window, 'isarInit')) break;
+      await Future.delayed(const Duration(milliseconds: 50));
+    }
+  }
 
-  // Load the ES module via a script tag
-  final script = ScriptElement();
-  script.type = 'module';
-  // ignore: unsafe_html
-  script.src = url;
-  script.async = true;
-  document.head!.append(script);
-
-  try {
-    await script.onLoad.first.timeout(
-      const Duration(seconds: 30),
-      onTimeout: () {
-        throw IsarError(
-          'Could not load Isar WASM module from "$url".\n'
-          '\n'
-          'Make sure you have run the setup command:\n'
-          '  dart run isar_community_web:setup\n',
-        );
-      },
-    );
-  } catch (e) {
+  if (!js_util.hasProperty(window, 'isarInit')) {
     throw IsarError(
-      'Failed to load Isar WASM module: $e\n'
+      'Isar Web not found. Add isar_wasm.js and sql.js to web/index.html.\n'
       '\n'
-      'Run: dart run isar_community_web:setup',
+      'Required in web/index.html before Flutter bootstrap:\n'
+      '  <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/sql-wasm.js"></script>\n'
+      '  <script>\n'
+      '    window._isarReady = initSqlJs({\n'
+      '      locateFile: function(f) {\n'
+      '        return "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.11.0/" + f;\n'
+      '      }\n'
+      '    }).then(function(sql) { window._isarSql = sql; });\n'
+      '  </script>\n'
+      '  <script src="isar_wasm.js"></script>',
     );
   }
 
@@ -57,7 +56,7 @@ Future<void> initializeIsarWeb([String? wasmUrl]) async {
     throw IsarError(
       'Isar WASM version mismatch: Dart package is ${Isar.version} '
       'but WASM module is $wasmVersion.\n'
-      'Run: dart run isar_community_web:setup',
+      'Update isar_wasm.js to match.',
     );
   }
 
