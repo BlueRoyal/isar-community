@@ -36,7 +36,9 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
     if (json == null) return null;
     final id = (json['_id'] as num).toInt();
     final reader = _JsonIsarReader(json, _propertyNames);
-    return schema.deserialize(id, reader, _offsets, isar.offsets);
+    final obj = schema.deserialize(id, reader, _offsets, isar.offsets);
+    schema.attach(this, id, obj);
+    return obj;
   }
 
   List<OBJ?> deserializeList(List<dynamic> jsonList) {
