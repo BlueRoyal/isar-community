@@ -1,11 +1,9 @@
 // ignore_for_file: public_member_api_docs
-//
-// JS interop bindings for the isar-wasm WASM module.
-//
-// These replace the old IndexedDB-based bindings.  Every function here
-// corresponds to a #[wasm_bindgen] export in the Rust crate.
 
-import 'dart:js_interop';
+@JS()
+library isar_wasm_bindings;
+
+import 'package:js/js.dart';
 
 // ── Module initialisation ────────────────────────────────────────────
 
@@ -13,35 +11,33 @@ import 'dart:js_interop';
 external void isarInitJs();
 
 @JS('isarVersion')
-external JSString isarVersionJs();
-
-String isarVersion() => isarVersionJs().toDart;
+external String isarVersionJs();
 
 // ── Instance lifecycle ───────────────────────────────────────────────
 
 @JS('openIsar')
 external IsarInstanceJs openIsarJs(
-  JSString name,
-  JSString schemasJson,
-  JSBoolean relaxedDurability,
+  String name,
+  String schemasJson,
+  bool relaxedDurability,
 );
 
 @JS('closeIsar')
-external void closeIsarJs(IsarInstanceJs instance, JSBoolean deleteFromDisk);
+external void closeIsarJs(IsarInstanceJs instance, bool deleteFromDisk);
 
-/// Opaque handle to a WASM-side IsarInstance.
-extension type IsarInstanceJs(JSObject _) implements JSObject {
-  external JSString get name;
+@JS('IsarInstance')
+class IsarInstanceJs {
+  external String get name;
 }
 
 // ── Transactions ─────────────────────────────────────────────────────
 
 @JS('isarBeginTxn')
-external IsarTxnJs isarBeginTxnJs(IsarInstanceJs instance, JSBoolean write);
+external IsarTxnJs isarBeginTxnJs(IsarInstanceJs instance, bool write);
 
-/// Opaque transaction handle.
-extension type IsarTxnJs(JSObject _) implements JSObject {
-  external JSBoolean get write;
+@JS('IsarTxn')
+class IsarTxnJs {
+  external bool get write;
   external void commit();
   external void abort();
 }
@@ -49,64 +45,64 @@ extension type IsarTxnJs(JSObject _) implements JSObject {
 // ── Collection CRUD ──────────────────────────────────────────────────
 
 @JS('isarGetAll')
-external JSString isarGetAllJs(
+external String isarGetAllJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString collectionName,
-  JSString idsJson,
+  String collectionName,
+  String idsJson,
 );
 
 @JS('isarPutAll')
-external JSString isarPutAllJs(
+external String isarPutAllJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString collectionName,
-  JSString objectsJson,
+  String collectionName,
+  String objectsJson,
 );
 
 @JS('isarDeleteAll')
-external JSNumber isarDeleteAllJs(
+external int isarDeleteAllJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString collectionName,
-  JSString idsJson,
+  String collectionName,
+  String idsJson,
 );
 
 @JS('isarClear')
 external void isarClearJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString collectionName,
+  String collectionName,
 );
 
 @JS('isarCount')
-external JSNumber isarCountJs(
+external int isarCountJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString collectionName,
+  String collectionName,
 );
 
 // ── Query execution ──────────────────────────────────────────────────
 
 @JS('isarQuery')
-external JSString isarQueryJs(
+external String isarQueryJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString sql,
+  String sql,
 );
 
 @JS('isarAggregate')
-external JSString isarAggregateJs(
+external String isarAggregateJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString sql,
+  String sql,
 );
 
 @JS('isarDeleteQuery')
-external JSNumber isarDeleteQueryJs(
+external int isarDeleteQueryJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString sql,
+  String sql,
 );
 
 // ── Link operations ──────────────────────────────────────────────────
@@ -115,18 +111,18 @@ external JSNumber isarDeleteQueryJs(
 external void isarLinkUpdateJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString sourceCollection,
-  JSString linkName,
-  JSNumber sourceId,
-  JSString addTargetIdsJson,
-  JSString removeTargetIdsJson,
+  String sourceCollection,
+  String linkName,
+  int sourceId,
+  String addTargetIdsJson,
+  String removeTargetIdsJson,
 );
 
 @JS('isarLinkClear')
 external void isarLinkClearJs(
   IsarInstanceJs instance,
   IsarTxnJs txn,
-  JSString sourceCollection,
-  JSString linkName,
-  JSNumber sourceId,
+  String sourceCollection,
+  String linkName,
+  int sourceId,
 );

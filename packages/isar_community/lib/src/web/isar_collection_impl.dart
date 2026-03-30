@@ -1,13 +1,7 @@
 // ignore_for_file: public_member_api_docs, invalid_use_of_protected_member
-//
-// Collection implementation for WASM/web.
-//
-// Objects are serialised to/from JSON maps.  The WASM module handles
-// the actual SQL execution.
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:js_interop';
 import 'dart:typed_data';
 
 import 'package:isar_community/isar.dart';
@@ -33,27 +27,29 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
 
   late final _offsets = isar.offsets[OBJ]!;
 
+  List<String> get _propertyNames =>
+      schema.properties.keys.toList();
+
   // ── Deserialisation ────────────────────────────────────────────────
 
-  OBJ? _deserializeFromJson(Map<String, dynamic>? json) {
+  OBJ? deserializeFromJson(Map<String, dynamic>? json) {
     if (json == null) return null;
-    final id = json['_id'] as int;
-    // Build an IsarReader-compatible object from the JSON map
-    final reader = _JsonIsarReader(json, _offsets);
+    final id = (json['_id'] as num).toInt();
+    final reader = _JsonIsarReader(json, _propertyNames);
     return schema.deserialize(id, reader, _offsets, isar.offsets);
   }
 
-  List<OBJ?> _deserializeList(List<dynamic> jsonList) {
+  List<OBJ?> deserializeList(List<dynamic> jsonList) {
     return jsonList.map((item) {
       if (item == null) return null;
-      return _deserializeFromJson(item as Map<String, dynamic>);
+      return deserializeFromJson(item as Map<String, dynamic>);
     }).toList();
   }
 
   // ── Serialisation ──────────────────────────────────────────────────
 
   Map<String, dynamic> _serializeObj(OBJ object) {
-    final writer = _JsonIsarWriter(_offsets, schema.properties);
+    final writer = _JsonIsarWriter(_propertyNames);
     schema.serialize(object, writer, _offsets, isar.offsets);
     final map = writer.toMap();
     map['_id'] = schema.getId(object);
@@ -66,28 +62,24 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
   Future<List<OBJ?>> getAll(List<Id> ids) {
     return isar.getTxn(false, (txn) async {
       final resultJson = isarGetAllJs(
-        isar.instance,
-        txn,
-        name.toJS,
-        jsonEncode(ids).toJS,
-      ).toDart;
-
+        isar.instance, txn, name, jsonEncode(ids),
+      );
       final list = jsonDecode(resultJson) as List<dynamic>;
-      return _deserializeList(list);
+      return deserializeList(list);
     });
   }
 
   @override
   Future<List<OBJ?>> getAllByIndex(String indexName, List<IndexKey> keys) {
-    // Build SQL for index lookup
     return isar.getTxn(false, (txn) async {
       final results = <OBJ?>[];
+      final idx = schema.indexes[indexName];
+      if (idx == null) throw IsarError('Unknown index "$indexName"');
+
       for (final key in keys) {
         final conditions = <String>[];
-        final indexSchema = schema.indexes
-            .firstWhere((idx) => idx.name == indexName);
-        for (var i = 0; i < key.length && i < indexSchema.properties.length; i++) {
-          final propName = indexSchema.properties[i].name;
+        for (var i = 0; i < key.length && i < idx.properties.length; i++) {
+          final propName = idx.properties[i].name;
           final value = key[i];
           if (value is String) {
             conditions.add('"$propName" = \'${_escapeSql(value)}\'');
@@ -97,14 +89,13 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
             conditions.add('"$propName" = $value');
           }
         }
-
         final sql =
-            'SELECT _id, * FROM "$name" WHERE ${conditions.join(" AND ")} LIMIT 1;';
-        final json = isarQueryJs(isar.instance, txn, sql.toJS).toDart;
+            'SELECT * FROM "$name" WHERE ${conditions.join(" AND ")} LIMIT 1;';
+        final json = isarQueryJs(isar.instance, txn, sql);
         final list = jsonDecode(json) as List<dynamic>;
         results.add(list.isEmpty
             ? null
-            : _deserializeFromJson(list[0] as Map<String, dynamic>));
+            : deserializeFromJson(list[0] as Map<String, dynamic>));
       }
       return results;
     });
@@ -122,15 +113,12 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
     return isar.getTxn(true, (txn) async {
       final serialized = objects.map(_serializeObj).toList();
       final resultJson = isarPutAllJs(
-        isar.instance,
-        txn,
-        name.toJS,
-        jsonEncode(serialized).toJS,
-      ).toDart;
+        isar.instance, txn, name, jsonEncode(serialized),
+      );
+      final ids = (jsonDecode(resultJson) as List<dynamic>)
+          .map((e) => (e as num).toInt())
+          .toList();
 
-      final ids = (jsonDecode(resultJson) as List<dynamic>).cast<int>();
-
-      // Attach ids back to objects
       for (var i = 0; i < objects.length; i++) {
         schema.attach(this, ids[i], objects[i]);
       }
@@ -144,7 +132,6 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
 
   @override
   Future<List<Id>> putAllByIndex(String? indexName, List<OBJ> objects) {
-    // For WASM/SQLite, INSERT OR REPLACE handles upsert via UNIQUE indexes
     return putAll(objects);
   }
 
@@ -159,13 +146,7 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
   @override
   Future<int> deleteAll(List<Id> ids) {
     return isar.getTxn(true, (txn) async {
-      final count = isarDeleteAllJs(
-        isar.instance,
-        txn,
-        name.toJS,
-        jsonEncode(ids).toJS,
-      );
-      return count.toDartInt;
+      return isarDeleteAllJs(isar.instance, txn, name, jsonEncode(ids));
     });
   }
 
@@ -173,12 +154,13 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
   Future<int> deleteAllByIndex(String indexName, List<IndexKey> keys) {
     return isar.getTxn(true, (txn) async {
       var totalDeleted = 0;
+      final idx = schema.indexes[indexName];
+      if (idx == null) throw IsarError('Unknown index "$indexName"');
+
       for (final key in keys) {
         final conditions = <String>[];
-        final indexSchema = schema.indexes
-            .firstWhere((idx) => idx.name == indexName);
-        for (var i = 0; i < key.length && i < indexSchema.properties.length; i++) {
-          final propName = indexSchema.properties[i].name;
+        for (var i = 0; i < key.length && i < idx.properties.length; i++) {
+          final propName = idx.properties[i].name;
           final value = key[i];
           if (value is String) {
             conditions.add('"$propName" = \'${_escapeSql(value)}\'');
@@ -188,10 +170,8 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
             conditions.add('"$propName" = $value');
           }
         }
-        final sql =
-            'DELETE FROM "$name" WHERE ${conditions.join(" AND ")};';
-        final count = isarDeleteQueryJs(isar.instance, txn, sql.toJS);
-        totalDeleted += count.toDartInt;
+        final sql = 'DELETE FROM "$name" WHERE ${conditions.join(" AND ")};';
+        totalDeleted += isarDeleteQueryJs(isar.instance, txn, sql);
       }
       return totalDeleted;
     });
@@ -207,7 +187,7 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
   @override
   Future<void> clear() {
     return isar.getTxn(true, (txn) async {
-      isarClearJs(isar.instance, txn, name.toJS);
+      isarClearJs(isar.instance, txn, name);
     });
   }
 
@@ -217,12 +197,7 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
   @override
   Future<void> importJson(List<Map<String, dynamic>> json) {
     return isar.getTxn(true, (txn) async {
-      isarPutAllJs(
-        isar.instance,
-        txn,
-        name.toJS,
-        jsonEncode(json).toJS,
-      );
+      isarPutAllJs(isar.instance, txn, name, jsonEncode(json));
     });
   }
 
@@ -255,11 +230,8 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
   int getSizeSync({bool includeIndexes = false, bool includeLinks = false}) =>
       unsupportedOnWeb();
 
-  // ── Watch (stub – requires polling or SQLite hooks) ────────────────
-
   @override
   Stream<void> watchLazy({bool fireImmediately = false}) {
-    // TODO: Implement via polling or SQLite update hooks
     return const Stream.empty();
   }
 
@@ -269,15 +241,12 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
     bool fireImmediately = false,
     bool deserialize = true,
   }) {
-    // TODO: Implement via polling
     return const Stream.empty();
   }
 
   @override
   Stream<void> watchObjectLazy(Id id, {bool fireImmediately = false}) =>
       watchObject(id, deserialize: false).map((_) {});
-
-  // ── Query builder ──────────────────────────────────────────────────
 
   @override
   Query<T> buildQuery<T>({
@@ -321,24 +290,17 @@ class IsarCollectionImpl<OBJ> extends IsarCollection<OBJ> {
 
 String _escapeSql(String value) => value.replaceAll("'", "''");
 
-// ── Lightweight IsarReader/IsarWriter over JSON maps ─────────────────
+// ── IsarReader over JSON maps ────────────────────────────────────────
 
-/// Reads property values from a JSON map by offset.
-///
-/// The offset list maps property indices to the JSON map.  We use
-/// the property name from the schema to look up values.
 class _JsonIsarReader implements IsarReader {
-  _JsonIsarReader(this._map, this._offsets);
+  _JsonIsarReader(this._map, this._propertyNames);
 
   final Map<String, dynamic> _map;
-  final List<int> _offsets;
+  final List<String> _propertyNames;
 
   dynamic _get(int offset) {
-    // offset is the property index – we need the property name
-    // For simplicity, iterate through map keys (ordered in schema order)
-    final keys = _map.keys.where((k) => k != '_id').toList();
-    if (offset < keys.length) {
-      return _map[keys[offset]];
+    if (offset < _propertyNames.length) {
+      return _map[_propertyNames[offset]];
     }
     return null;
   }
@@ -355,6 +317,9 @@ class _JsonIsarReader implements IsarReader {
 
   @override
   int readByte(int offset) => (_get(offset) as num?)?.toInt() ?? 0;
+
+  @override
+  int? readByteOrNull(int offset) => (_get(offset) as num?)?.toInt();
 
   @override
   int readInt(int offset) => (_get(offset) as num?)?.toInt() ?? -2147483648;
@@ -403,124 +368,186 @@ class _JsonIsarReader implements IsarReader {
   String? readStringOrNull(int offset) => _get(offset)?.toString();
 
   @override
-  Uint8List readByteList(int offset) {
-    final list = _get(offset);
-    if (list is List) return Uint8List.fromList(list.cast<int>());
-    return Uint8List(0);
-  }
-
-  @override
-  Uint8List? readByteListOrNull(int offset) {
-    final list = _get(offset);
-    if (list is List) return Uint8List.fromList(list.cast<int>());
+  T? readObjectOrNull<T>(
+    int offset,
+    Deserialize<T> deserialize,
+    Map<Type, List<int>> allOffsets,
+  ) {
+    final v = _get(offset);
+    if (v == null) return null;
+    if (v is Map<String, dynamic>) {
+      // Embedded objects stored as JSON
+      final reader = _JsonIsarReader(v, v.keys.toList());
+      final offsets = allOffsets[T] ?? [];
+      return deserialize(0, reader, offsets, allOffsets);
+    }
     return null;
   }
 
   @override
-  List<bool> readBoolList(int offset) {
+  List<bool>? readBoolList(int offset) {
     final list = _get(offset);
-    if (list is List) return list.cast<bool>();
-    return [];
-  }
-
-  @override
-  List<bool>? readBoolListOrNull(int offset) {
-    final list = _get(offset);
-    if (list is List) return list.cast<bool>();
+    if (list is List) return list.map((e) => e == true || e == 1).toList();
     return null;
   }
 
   @override
-  List<int> readIntList(int offset) {
+  List<bool?>? readBoolOrNullList(int offset) {
     final list = _get(offset);
-    if (list is List) return list.map((e) => (e as num).toInt()).toList();
-    return [];
+    if (list is List) {
+      return list.map((e) => e == null ? null : (e == true || e == 1)).toList();
+    }
+    return null;
   }
 
   @override
-  List<int>? readIntListOrNull(int offset) {
+  List<int>? readByteList(int offset) {
     final list = _get(offset);
     if (list is List) return list.map((e) => (e as num).toInt()).toList();
     return null;
   }
 
   @override
-  List<double> readFloatList(int offset) {
+  List<int>? readIntList(int offset) {
     final list = _get(offset);
-    if (list is List) return list.map((e) => (e as num).toDouble()).toList();
-    return [];
+    if (list is List) return list.map((e) => (e as num).toInt()).toList();
+    return null;
   }
 
   @override
-  List<double>? readFloatListOrNull(int offset) {
+  List<int?>? readIntOrNullList(int offset) {
+    final list = _get(offset);
+    if (list is List) {
+      return list.map((e) => e == null ? null : (e as num).toInt()).toList();
+    }
+    return null;
+  }
+
+  @override
+  List<double>? readFloatList(int offset) {
     final list = _get(offset);
     if (list is List) return list.map((e) => (e as num).toDouble()).toList();
     return null;
   }
 
   @override
-  List<int> readLongList(int offset) => readIntList(offset);
-
-  @override
-  List<int>? readLongListOrNull(int offset) => readIntListOrNull(offset);
-
-  @override
-  List<double> readDoubleList(int offset) => readFloatList(offset);
-
-  @override
-  List<double>? readDoubleListOrNull(int offset) =>
-      readFloatListOrNull(offset);
-
-  @override
-  List<String> readStringList(int offset) {
+  List<double?>? readFloatOrNullList(int offset) {
     final list = _get(offset);
-    if (list is List) return list.map((e) => e.toString()).toList();
-    return [];
+    if (list is List) {
+      return list
+          .map((e) => e == null ? null : (e as num).toDouble())
+          .toList();
+    }
+    return null;
   }
 
   @override
-  List<String>? readStringListOrNull(int offset) {
+  List<int>? readLongList(int offset) => readIntList(offset);
+
+  @override
+  List<int?>? readLongOrNullList(int offset) => readIntOrNullList(offset);
+
+  @override
+  List<double>? readDoubleList(int offset) => readFloatList(offset);
+
+  @override
+  List<double?>? readDoubleOrNullList(int offset) =>
+      readFloatOrNullList(offset);
+
+  @override
+  List<String>? readStringList(int offset) {
     final list = _get(offset);
     if (list is List) return list.map((e) => e.toString()).toList();
     return null;
   }
 
   @override
-  List<DateTime> readDateTimeList(int offset) {
+  List<String?>? readStringOrNullList(int offset) {
+    final list = _get(offset);
+    if (list is List) {
+      return list.map((e) => e?.toString()).toList();
+    }
+    return null;
+  }
+
+  @override
+  List<DateTime>? readDateTimeList(int offset) {
     final list = _get(offset);
     if (list is List) {
       return list
           .map((e) => DateTime.fromMillisecondsSinceEpoch((e as num).toInt()))
           .toList();
     }
-    return [];
+    return null;
   }
 
   @override
-  List<DateTime>? readDateTimeListOrNull(int offset) {
+  List<DateTime?>? readDateTimeOrNullList(int offset) {
     final list = _get(offset);
     if (list is List) {
-      return list
-          .map((e) => DateTime.fromMillisecondsSinceEpoch((e as num).toInt()))
-          .toList();
+      return list.map((e) {
+        if (e == null) return null;
+        return DateTime.fromMillisecondsSinceEpoch((e as num).toInt());
+      }).toList();
+    }
+    return null;
+  }
+
+  @override
+  List<T>? readObjectList<T>(
+    int offset,
+    Deserialize<T> deserialize,
+    Map<Type, List<int>> allOffsets,
+    T defaultValue,
+  ) {
+    final list = _get(offset);
+    if (list is List) {
+      return list.map((e) {
+        if (e is Map<String, dynamic>) {
+          final reader = _JsonIsarReader(e, e.keys.toList());
+          final offsets = allOffsets[T] ?? [];
+          return deserialize(0, reader, offsets, allOffsets);
+        }
+        return defaultValue;
+      }).toList();
+    }
+    return null;
+  }
+
+  @override
+  List<T?>? readObjectOrNullList<T>(
+    int offset,
+    Deserialize<T> deserialize,
+    Map<Type, List<int>> allOffsets,
+  ) {
+    final list = _get(offset);
+    if (list is List) {
+      return list.map((e) {
+        if (e is Map<String, dynamic>) {
+          final reader = _JsonIsarReader(e, e.keys.toList());
+          final offsets = allOffsets[T] ?? [];
+          return deserialize(0, reader, offsets, allOffsets);
+        }
+        return null;
+      }).toList();
     }
     return null;
   }
 }
 
-/// Writes property values to a JSON map for INSERT.
-class _JsonIsarWriter implements IsarWriter {
-  _JsonIsarWriter(this._offsets, this._properties);
+// ── IsarWriter over JSON maps ────────────────────────────────────────
 
-  final List<int> _offsets;
-  final List<PropertySchema<dynamic>> _properties;
+class _JsonIsarWriter implements IsarWriter {
+  _JsonIsarWriter(this._propertyNames);
+
+  final List<String> _propertyNames;
   final Map<String, dynamic> _data = {};
 
   Map<String, dynamic> toMap() => _data;
 
   String? _nameForOffset(int offset) {
-    if (offset < _properties.length) {
-      return _properties[offset].name;
+    if (offset < _propertyNames.length) {
+      return _propertyNames[offset];
     }
     return null;
   }
@@ -559,28 +586,72 @@ class _JsonIsarWriter implements IsarWriter {
   void writeString(int offset, String? value) => _set(offset, value);
 
   @override
-  void writeByteList(int offset, Uint8List? value) =>
-      _set(offset, value?.toList());
+  void writeObject<T>(
+    int offset,
+    Map<Type, List<int>> allOffsets,
+    Serialize<T> serialize,
+    T? value,
+  ) {
+    if (value == null) {
+      _set(offset, null);
+      return;
+    }
+    final objectOffsets = allOffsets[T] ?? [];
+    final writer = _JsonIsarWriter(
+      objectOffsets.map((e) => 'p$e').toList(),
+    );
+    serialize(value, writer, objectOffsets, allOffsets);
+    _set(offset, writer.toMap());
+  }
 
   @override
-  void writeBoolList(int offset, List<bool>? value) => _set(offset, value);
+  void writeByteList(int offset, List<int>? values) => _set(offset, values);
 
   @override
-  void writeIntList(int offset, List<int>? value) => _set(offset, value);
+  void writeBoolList(int offset, List<bool?>? values) => _set(offset, values);
 
   @override
-  void writeFloatList(int offset, List<double>? value) => _set(offset, value);
+  void writeIntList(int offset, List<int?>? values) => _set(offset, values);
 
   @override
-  void writeLongList(int offset, List<int>? value) => _set(offset, value);
+  void writeFloatList(int offset, List<double?>? values) =>
+      _set(offset, values);
 
   @override
-  void writeDoubleList(int offset, List<double>? value) => _set(offset, value);
+  void writeLongList(int offset, List<int?>? values) => _set(offset, values);
 
   @override
-  void writeStringList(int offset, List<String>? value) => _set(offset, value);
+  void writeDoubleList(int offset, List<double?>? values) =>
+      _set(offset, values);
 
   @override
-  void writeDateTimeList(int offset, List<DateTime>? value) =>
-      _set(offset, value?.map((d) => d.millisecondsSinceEpoch).toList());
+  void writeDateTimeList(int offset, List<DateTime?>? values) =>
+      _set(offset, values?.map((d) => d?.millisecondsSinceEpoch).toList());
+
+  @override
+  void writeStringList(int offset, List<String?>? values) =>
+      _set(offset, values);
+
+  @override
+  void writeObjectList<T>(
+    int offset,
+    Map<Type, List<int>> allOffsets,
+    Serialize<T> serialize,
+    List<T?>? values,
+  ) {
+    if (values == null) {
+      _set(offset, null);
+      return;
+    }
+    final objectOffsets = allOffsets[T] ?? [];
+    final list = values.map((v) {
+      if (v == null) return null;
+      final writer = _JsonIsarWriter(
+        objectOffsets.map((e) => 'p$e').toList(),
+      );
+      serialize(v, writer, objectOffsets, allOffsets);
+      return writer.toMap();
+    }).toList();
+    _set(offset, list);
+  }
 }

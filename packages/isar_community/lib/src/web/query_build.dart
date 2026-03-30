@@ -1,13 +1,8 @@
 // ignore_for_file: public_member_api_docs, invalid_use_of_protected_member
-//
-// Query builder for WASM/web.
-//
-// Translates Isar's query DSL (WhereClause, Filter, Sort, Distinct,
-// property projections) into SQL strings that the WASM module executes.
 
 import 'dart:async';
 import 'dart:convert';
-import 'dart:js_interop';
+import 'dart:typed_data';
 
 import 'package:isar_community/isar.dart';
 import 'package:isar_community/src/web/bindings.dart';
@@ -66,7 +61,10 @@ class _WasmQuery<T, OBJ> extends Query<T> {
   final int? limit;
   final String? property;
 
-  IsarImpl get isar => collection.isar;
+  @override
+  Isar get isar => collection.isar;
+
+  IsarImpl get _isar => collection.isar;
   String get tableName => collection.name;
 
   // ── SQL generation ─────────────────────────────────────────────────
@@ -74,13 +72,11 @@ class _WasmQuery<T, OBJ> extends Query<T> {
   String _buildSelectSql({String select = '*'}) {
     final buf = StringBuffer('SELECT $select FROM "$tableName"');
 
-    // WHERE clauses
     final conditions = _buildWhereConditions();
     if (conditions.isNotEmpty) {
       buf.write(' WHERE ${conditions.join(" AND ")}');
     }
 
-    // ORDER BY
     final orderParts = <String>[];
     if (sortBy.isNotEmpty) {
       for (final sort in sortBy) {
@@ -93,7 +89,6 @@ class _WasmQuery<T, OBJ> extends Query<T> {
     }
     buf.write(' ORDER BY ${orderParts.join(", ")}');
 
-    // LIMIT / OFFSET
     if (limit != null) buf.write(' LIMIT $limit');
     if (offset != null) buf.write(' OFFSET $offset');
 
@@ -104,38 +99,40 @@ class _WasmQuery<T, OBJ> extends Query<T> {
   List<String> _buildWhereConditions() {
     final conditions = <String>[];
 
-    // WhereClause → range conditions on _id or indexed columns
     for (final wc in whereClauses) {
-      if (wc.indexName == null) {
-        // Id-based where clause
-        if (wc.lower != null && wc.lower!.isNotEmpty) {
-          final op = wc.includeLower ? '>=' : '>';
-          conditions.add('_id $op ${wc.lower![0]}');
-        }
-        if (wc.upper != null && wc.upper!.isNotEmpty) {
-          final op = wc.includeUpper ? '<=' : '<';
-          conditions.add('_id $op ${wc.upper![0]}');
-        }
-      } else {
-        // Index-based where clause
+      if (wc is IdWhereClause) {
         if (wc.lower != null) {
-          for (var i = 0; i < wc.lower!.length; i++) {
-            final value = wc.lower![i];
-            final op = wc.includeLower ? '>=' : '>';
-            conditions.add(_formatCondition(wc.indexName!, i, op, value));
-          }
+          final op = wc.includeLower ? '>=' : '>';
+          conditions.add('_id $op ${wc.lower}');
         }
         if (wc.upper != null) {
-          for (var i = 0; i < wc.upper!.length; i++) {
-            final value = wc.upper![i];
-            final op = wc.includeUpper ? '<=' : '<';
-            conditions.add(_formatCondition(wc.indexName!, i, op, value));
+          final op = wc.includeUpper ? '<=' : '<';
+          conditions.add('_id $op ${wc.upper}');
+        }
+      } else if (wc is IndexWhereClause) {
+        final idx = collection.schema.indexes[wc.indexName];
+        if (idx != null) {
+          if (wc.lower != null) {
+            for (var i = 0; i < wc.lower!.length && i < idx.properties.length; i++) {
+              final propName = idx.properties[i].name;
+              final value = wc.lower![i];
+              final op = wc.includeLower ? '>=' : '>';
+              conditions.add(_formatValueCondition(propName, op, value));
+            }
+          }
+          if (wc.upper != null) {
+            for (var i = 0; i < wc.upper!.length && i < idx.properties.length; i++) {
+              final propName = idx.properties[i].name;
+              final value = wc.upper![i];
+              final op = wc.includeUpper ? '<=' : '<';
+              conditions.add(_formatValueCondition(propName, op, value));
+            }
           }
         }
       }
+      // LinkWhereClause handled via subquery if needed
     }
 
-    // Filter → SQL WHERE
     if (filter != null) {
       final filterSql = _filterToSql(filter!);
       if (filterSql.isNotEmpty) {
@@ -146,14 +143,7 @@ class _WasmQuery<T, OBJ> extends Query<T> {
     return conditions;
   }
 
-  String _formatCondition(String indexName, int propIndex, String op, dynamic value) {
-    // Resolve the property name from the index schema
-    final indexSchema = collection.schema.indexes
-        .firstWhere((idx) => idx.name == indexName);
-    final propName = propIndex < indexSchema.properties.length
-        ? indexSchema.properties[propIndex].name
-        : indexName;
-
+  String _formatValueCondition(String propName, String op, dynamic value) {
     if (value is String) {
       return '"$propName" $op \'${_escapeSql(value)}\'';
     } else if (value == null) {
@@ -165,14 +155,23 @@ class _WasmQuery<T, OBJ> extends Query<T> {
 
   String _filterToSql(FilterOperation filter) {
     if (filter is FilterGroup) {
-      final parts = filter.filters.map(_filterToSql).where((s) => s.isNotEmpty).toList();
+      if (filter.type == FilterGroupType.not) {
+        if (filter.filters.isEmpty) return '';
+        final inner = _filterToSql(filter.filters.first);
+        return inner.isEmpty ? '' : 'NOT ($inner)';
+      }
+      final parts = filter.filters
+          .map(_filterToSql)
+          .where((s) => s.isNotEmpty)
+          .toList();
       if (parts.isEmpty) return '';
       final joiner = filter.type == FilterGroupType.and ? ' AND ' : ' OR ';
-      final expr = parts.join(joiner);
-      if (filter.not) return 'NOT ($expr)';
-      return '($expr)';
+      return '(${parts.join(joiner)})';
     } else if (filter is FilterCondition) {
       return _conditionToSql(filter);
+    } else if (filter is ObjectFilter) {
+      // Embedded object filters — apply to JSON column
+      return _filterToSql(filter.filter);
     }
     return '';
   }
@@ -181,38 +180,42 @@ class _WasmQuery<T, OBJ> extends Query<T> {
     final prop = '"${cond.property}"';
 
     switch (cond.type) {
-      case ConditionType.eq:
+      case FilterConditionType.equalTo:
         if (cond.value1 == null) return '$prop IS NULL';
         return '$prop = ${_sqlValue(cond.value1)}';
-      case ConditionType.gt:
-        return '$prop > ${_sqlValue(cond.value1)}';
-      case ConditionType.gte:
-        return '$prop >= ${_sqlValue(cond.value1)}';
-      case ConditionType.lt:
-        return '$prop < ${_sqlValue(cond.value1)}';
-      case ConditionType.lte:
-        return '$prop <= ${_sqlValue(cond.value1)}';
-      case ConditionType.between:
-        return '$prop BETWEEN ${_sqlValue(cond.value1)} AND ${_sqlValue(cond.value2)}';
-      case ConditionType.startsWith:
+      case FilterConditionType.greaterThan:
+        final op = cond.include1 ? '>=' : '>';
+        return '$prop $op ${_sqlValue(cond.value1)}';
+      case FilterConditionType.lessThan:
+        final op = cond.include1 ? '<=' : '<';
+        return '$prop $op ${_sqlValue(cond.value1)}';
+      case FilterConditionType.between:
+        final lower = _sqlValue(cond.value1);
+        final upper = _sqlValue(cond.value2);
+        return '$prop BETWEEN $lower AND $upper';
+      case FilterConditionType.startsWith:
         return '$prop LIKE \'${_escapeSql(cond.value1.toString())}%\'';
-      case ConditionType.endsWith:
+      case FilterConditionType.endsWith:
         return '$prop LIKE \'%${_escapeSql(cond.value1.toString())}\'';
-      case ConditionType.contains:
+      case FilterConditionType.contains:
         return '$prop LIKE \'%${_escapeSql(cond.value1.toString())}%\'';
-      case ConditionType.matches:
-        // Isar wildcard pattern: * → %, ? → _
+      case FilterConditionType.matches:
         final pattern = cond.value1
             .toString()
             .replaceAll('*', '%')
             .replaceAll('?', '_');
         return '$prop LIKE \'${_escapeSql(pattern)}\'';
-      case ConditionType.isNull:
+      case FilterConditionType.isNull:
         return '$prop IS NULL';
-      case ConditionType.isNotNull:
+      case FilterConditionType.isNotNull:
         return '$prop IS NOT NULL';
-      default:
-        return '';
+      case FilterConditionType.elementIsNull:
+        return '$prop LIKE \'%null%\'';
+      case FilterConditionType.elementIsNotNull:
+        return '$prop IS NOT NULL';
+      case FilterConditionType.listLength:
+        // Approximate: JSON array length
+        return 'json_array_length($prop) BETWEEN ${cond.value1} AND ${cond.value2}';
     }
   }
 
@@ -227,12 +230,12 @@ class _WasmQuery<T, OBJ> extends Query<T> {
 
   @override
   Future<T?> findFirst() {
-    return isar.getTxn(false, (txn) async {
+    return _isar.getTxn(false, (txn) async {
       final sql = _buildSelectSql().replaceFirst(';', ' LIMIT 1;');
-      final json = isarQueryJs(isar.instance, txn, sql.toJS).toDart;
+      final json = isarQueryJs(_isar.instance, txn, sql);
       final list = jsonDecode(json) as List<dynamic>;
       if (list.isEmpty) return null;
-      return collection._deserializeFromJson(
+      return collection.deserializeFromJson(
         list[0] as Map<String, dynamic>,
       ) as T?;
     });
@@ -243,13 +246,12 @@ class _WasmQuery<T, OBJ> extends Query<T> {
 
   @override
   Future<List<T>> findAll() {
-    return isar.getTxn(false, (txn) async {
+    return _isar.getTxn(false, (txn) async {
       final sql = _buildSelectSql();
-      final json = isarQueryJs(isar.instance, txn, sql.toJS).toDart;
+      final json = isarQueryJs(_isar.instance, txn, sql);
       final list = jsonDecode(json) as List<dynamic>;
 
       if (property != null) {
-        // Property projection
         return list.map((row) {
           final map = row as Map<String, dynamic>;
           return map[property] as T;
@@ -257,7 +259,7 @@ class _WasmQuery<T, OBJ> extends Query<T> {
       }
 
       return list.map((item) {
-        return collection._deserializeFromJson(
+        return collection.deserializeFromJson(
           item as Map<String, dynamic>,
         ) as T;
       }).toList();
@@ -268,31 +270,31 @@ class _WasmQuery<T, OBJ> extends Query<T> {
   List<T> findAllSync() => unsupportedOnWeb();
 
   @override
-  Future<int> deleteFirst() {
-    return isar.getTxn(true, (txn) async {
-      // Find the first matching id, then delete it
+  Future<bool> deleteFirst() {
+    return _isar.getTxn(true, (txn) async {
       final selectSql = _buildSelectSql(select: '_id')
           .replaceFirst(';', ' LIMIT 1;');
-      final json = isarQueryJs(isar.instance, txn, selectSql.toJS).toDart;
+      final json = isarQueryJs(_isar.instance, txn, selectSql);
       final list = jsonDecode(json) as List<dynamic>;
-      if (list.isEmpty) return 0;
+      if (list.isEmpty) return false;
       final id = (list[0] as Map<String, dynamic>)['_id'];
       final deleteSql = 'DELETE FROM "$tableName" WHERE _id = $id;';
-      return isarDeleteQueryJs(isar.instance, txn, deleteSql.toJS).toDartInt;
+      final count = isarDeleteQueryJs(_isar.instance, txn, deleteSql);
+      return count > 0;
     });
   }
 
   @override
-  int deleteFirstSync() => unsupportedOnWeb();
+  bool deleteFirstSync() => unsupportedOnWeb();
 
   @override
   Future<int> deleteAll() {
-    return isar.getTxn(true, (txn) async {
+    return _isar.getTxn(true, (txn) async {
       final conditions = _buildWhereConditions();
       final where =
           conditions.isEmpty ? '' : ' WHERE ${conditions.join(" AND ")}';
       final sql = 'DELETE FROM "$tableName"$where;';
-      return isarDeleteQueryJs(isar.instance, txn, sql.toJS).toDartInt;
+      return isarDeleteQueryJs(_isar.instance, txn, sql);
     });
   }
 
@@ -302,8 +304,8 @@ class _WasmQuery<T, OBJ> extends Query<T> {
   // ── Aggregates ─────────────────────────────────────────────────────
 
   @override
-  Future<R> aggregate<R>(AggregationOp op) {
-    return isar.getTxn(false, (txn) async {
+  Future<R?> aggregate<R>(AggregationOp op) {
+    return _isar.getTxn(false, (txn) async {
       final conditions = _buildWhereConditions();
       final where =
           conditions.isEmpty ? '' : ' WHERE ${conditions.join(" AND ")}';
@@ -311,49 +313,66 @@ class _WasmQuery<T, OBJ> extends Query<T> {
       late final String sql;
       switch (op) {
         case AggregationOp.count:
-          sql = 'SELECT COUNT(*) FROM "$tableName"$where;';
+          sql = 'SELECT COUNT(*) as v FROM "$tableName"$where;';
           break;
         case AggregationOp.isEmpty:
-          sql = 'SELECT COUNT(*) FROM "$tableName"$where LIMIT 1;';
+          sql = 'SELECT CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END as v FROM "$tableName"$where;';
           break;
         case AggregationOp.min:
-          sql = 'SELECT MIN("${property ?? "_id"}") FROM "$tableName"$where;';
+          sql = 'SELECT MIN("${property ?? "_id"}") as v FROM "$tableName"$where;';
           break;
         case AggregationOp.max:
-          sql = 'SELECT MAX("${property ?? "_id"}") FROM "$tableName"$where;';
+          sql = 'SELECT MAX("${property ?? "_id"}") as v FROM "$tableName"$where;';
           break;
         case AggregationOp.sum:
-          sql = 'SELECT SUM("${property ?? "_id"}") FROM "$tableName"$where;';
+          sql = 'SELECT SUM("${property ?? "_id"}") as v FROM "$tableName"$where;';
           break;
         case AggregationOp.average:
-          sql = 'SELECT AVG("${property ?? "_id"}") FROM "$tableName"$where;';
+          sql = 'SELECT AVG("${property ?? "_id"}") as v FROM "$tableName"$where;';
           break;
       }
 
-      final json = isarAggregateJs(isar.instance, txn, sql.toJS).toDart;
+      final json = isarAggregateJs(_isar.instance, txn, sql);
       final value = jsonDecode(json);
+      if (value == null) return null;
 
-      if (op == AggregationOp.isEmpty) {
-        return (value == 0) as R;
+      if (R == int) return (value as num).toInt() as R;
+      if (R == double) return (value as num).toDouble() as R;
+      if (R == DateTime) {
+        return DateTime.fromMillisecondsSinceEpoch((value as num).toInt()) as R;
       }
-      if (op == AggregationOp.count) {
-        return (value as num).toInt() as R;
-      }
-      return value as R;
+      return value as R?;
     });
   }
+
+  @override
+  R? aggregateSync<R>(AggregationOp op) => unsupportedOnWeb();
+
+  // ── Export ─────────────────────────────────────────────────────────
+
+  @override
+  Future<R> exportJsonRaw<R>(R Function(Uint8List) callback) {
+    return _isar.getTxn(false, (txn) async {
+      final sql = _buildSelectSql();
+      final json = isarQueryJs(_isar.instance, txn, sql);
+      final bytes = Uint8List.fromList(utf8.encode(json));
+      return callback(bytes);
+    });
+  }
+
+  @override
+  R exportJsonRawSync<R>(R Function(Uint8List) callback) =>
+      unsupportedOnWeb();
 
   // ── Watch (stub) ───────────────────────────────────────────────────
 
   @override
   Stream<List<T>> watch({bool fireImmediately = false}) {
-    // TODO: Implement via polling
     return const Stream.empty();
   }
 
   @override
   Stream<void> watchLazy({bool fireImmediately = false}) {
-    // TODO: Implement via polling
     return const Stream.empty();
   }
 }

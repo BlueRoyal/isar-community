@@ -1,6 +1,4 @@
 // ignore_for_file: unused_field, public_member_api_docs
-//
-// Web-specific constants and utilities for isar_community WASM.
 
 import 'dart:async';
 

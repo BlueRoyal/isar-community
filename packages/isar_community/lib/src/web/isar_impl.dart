@@ -1,13 +1,6 @@
 // ignore_for_file: public_member_api_docs
-//
-// Isar instance implementation for WASM/web.
-//
-// Transactions are synchronous because sqlite-wasm-rs operations
-// complete within the same microtask.  The Dart async API wraps
-// them in Futures for API compatibility with native.
 
 import 'dart:async';
-import 'dart:js_interop';
 
 import 'package:isar_community/isar.dart';
 import 'package:isar_community/src/web/bindings.dart';
@@ -33,8 +26,6 @@ class IsarImpl extends Isar {
     }
   }
 
-  // ── Transaction management ───────────────────────────────────────
-
   Future<T> _txn<T>(
     bool write,
     bool silent,
@@ -46,7 +37,7 @@ class IsarImpl extends Isar {
     final completer = Completer<void>();
     _activeAsyncTxns.add(completer.future);
 
-    final txn = isarBeginTxnJs(instance, write.toJS);
+    final txn = isarBeginTxnJs(instance, write);
 
     final zone = Zone.current.fork(zoneValues: {_zoneTxn: txn});
 
@@ -82,11 +73,10 @@ class IsarImpl extends Isar {
   T writeTxnSync<T>(T Function() callback, {bool silent = false}) =>
       unsupportedOnWeb();
 
-  /// Get or create a transaction for internal collection operations.
   Future<T> getTxn<T>(bool write, Future<T> Function(IsarTxnJs txn) callback) {
     final currentTxn = Zone.current[_zoneTxn] as IsarTxnJs?;
     if (currentTxn != null) {
-      if (write && !(currentTxn.write.toDart)) {
+      if (write && !currentTxn.write) {
         throw IsarError(
           'Operation cannot be performed within a read transaction.',
         );
@@ -100,8 +90,6 @@ class IsarImpl extends Isar {
       throw IsarError('Write operations require an explicit transaction.');
     }
   }
-
-  // ── Unsupported on web ────────────────────────────────────────────
 
   @override
   Future<int> getSize({
@@ -117,15 +105,13 @@ class IsarImpl extends Isar {
   @override
   Future<void> copyToFile(String targetPath) => unsupportedOnWeb();
 
-  // ── Close ─────────────────────────────────────────────────────────
-
   @override
   Future<bool> close({bool deleteFromDisk = false}) async {
     requireOpen();
     requireNotInTxn();
     await Future.wait(_activeAsyncTxns);
     await super.close();
-    closeIsarJs(instance, deleteFromDisk.toJS);
+    closeIsarJs(instance, deleteFromDisk);
     return true;
   }
 

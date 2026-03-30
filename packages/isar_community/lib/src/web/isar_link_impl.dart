@@ -1,5 +1,7 @@
 // ignore_for_file: public_member_api_docs
 
+import 'dart:convert';
+
 import 'package:isar_community/isar.dart';
 import 'package:isar_community/src/common/isar_link_base_impl.dart';
 import 'package:isar_community/src/common/isar_link_common.dart';
@@ -23,10 +25,6 @@ mixin IsarLinkBaseMixin<OBJ> on IsarLinkBaseImpl<OBJ> {
   late final String? backlinkLinkName =
       sourceCollection.schema.link(linkName).linkName;
 
-  late final IsarLinkJs jsLink = backlinkLinkName != null
-      ? targetCollection.native.getLink(backlinkLinkName!)
-      : sourceCollection.native.getLink(linkName);
-
   @override
   Future<void> update({
     Iterable<OBJ> link = const [],
@@ -37,7 +35,6 @@ mixin IsarLinkBaseMixin<OBJ> on IsarLinkBaseImpl<OBJ> {
     final unlinkList = unlink.toList();
 
     final containingId = requireAttached();
-    final backlink = backlinkLinkName != null;
 
     final linkIds = List<Id>.filled(linkList.length, 0);
     for (var i = 0; i < linkList.length; i++) {
@@ -49,13 +46,26 @@ mixin IsarLinkBaseMixin<OBJ> on IsarLinkBaseImpl<OBJ> {
       unlinkIds[i] = requireGetId(unlinkList[i]);
     }
 
+    final sourceName = sourceCollection.name;
     return targetCollection.isar.getTxn(true, (IsarTxnJs txn) async {
       if (reset) {
-        await jsLink.clear(txn, containingId, backlink).wait<dynamic>();
+        isarLinkClearJs(
+          targetCollection.isar.instance,
+          txn,
+          sourceName,
+          linkName,
+          containingId,
+        );
       }
-      return jsLink
-          .update(txn, backlink, containingId, linkIds, unlinkIds)
-          .wait();
+      isarLinkUpdateJs(
+        targetCollection.isar.instance,
+        txn,
+        sourceName,
+        linkName,
+        containingId,
+        jsonEncode(linkIds),
+        jsonEncode(unlinkIds),
+      );
     });
   }
 
