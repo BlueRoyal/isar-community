@@ -26,7 +26,7 @@ class ObjectInfo {
   final List<ObjectIndex> indexes;
   final List<ObjectLink> links;
 
-  int get id => xxh3(utf8.encode(isarName));
+  int get id => xxh3(utf8.encode(isarName)) & 0x1FFFFFFFFFFFFF;
 
   bool get isEmbedded => accessor == null;
 
@@ -171,7 +171,7 @@ class ObjectIndex {
   final bool unique;
   final bool replace;
 
-  late final id = xxh3(utf8.encode(name));
+  late final id = xxh3(utf8.encode(name)) & 0x1FFFFFFFFFFFFF;
 }
 
 class ObjectLink {
@@ -197,9 +197,9 @@ class ObjectLink {
 
   int id(String objectIsarName) {
     final col = isBacklink ? targetCollectionIsarName : objectIsarName;
-    final colId = xxh3(utf8.encode(col), seed: isBacklink ? 1 : 0);
+    final colId = xxh3(utf8.encode(col), seed: isBacklink ? 1 : 0) & 0x1FFFFFFFFFFFFF;
 
     final name = targetLinkIsarName ?? isarName;
-    return xxh3(utf8.encode(name), seed: colId);
+    return xxh3(utf8.encode(name), seed: colId) & 0x1FFFFFFFFFFFFF;
   }
 }
