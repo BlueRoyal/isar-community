@@ -1,0 +1,22 @@
+name: isar_community_web
+description: >
+  Web support for isar_community. Provides pre-built WASM binaries
+  that enable SQLite-backed Isar in Flutter Web applications.
+  Run "dart run isar_community_web:setup" after adding to pubspec.yaml.
+version: 3.3.0
+repository: https://github.com/isar-community/isar-community
+homepage: https://github.com/isar-community/isar-community
+issue_tracker: https://github.com/isar-community/isar-community/issues
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+  flutter: ">=3.10.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  isar_community: ^3.3.0
+  path: ^1.8.0
+
+# Die vorgebauten WASM-Dateien liegen in assets/
+# und werden per "dart run isar_community_web:setup" ins Projekt kopiert.

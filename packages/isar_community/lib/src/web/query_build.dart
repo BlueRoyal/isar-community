@@ -1,16 +1,22 @@
 // ignore_for_file: public_member_api_docs, invalid_use_of_protected_member
+//
+// Query builder for WASM/web.
+//
+// Translates Isar's query DSL (WhereClause, Filter, Sort, Distinct,
+// property projections) into SQL strings that the WASM module executes.
 
-import 'dart:indexed_db';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:js_interop';
 
 import 'package:isar_community/isar.dart';
-
 import 'package:isar_community/src/web/bindings.dart';
 import 'package:isar_community/src/web/isar_collection_impl.dart';
+import 'package:isar_community/src/web/isar_impl.dart';
 import 'package:isar_community/src/web/isar_web.dart';
-import 'package:isar_community/src/web/query_impl.dart';
 
 Query<T> buildWebQuery<T, OBJ>(
-  IsarCollectionImpl<OBJ> col,
+  IsarCollectionImpl<OBJ> collection,
   List<WhereClause> whereClauses,
   bool whereDistinct,
   Sort whereSort,
@@ -21,350 +27,335 @@ Query<T> buildWebQuery<T, OBJ>(
   int? limit,
   String? property,
 ) {
-  final whereClausesJs = whereClauses.map((wc) {
-    if (wc is IdWhereClause) {
-      return _buildIdWhereClause(wc);
-    } else if (wc is IndexWhereClause) {
-      return _buildIndexWhereClause(col.schema, wc);
-    } else {
-      return _buildLinkWhereClause(col, wc as LinkWhereClause);
-    }
-  }).toList();
-
-  final filterJs = filter != null ? _buildFilter(col.schema, filter) : null;
-  final sortJs = sortBy.isNotEmpty ? _buildSort(sortBy) : null;
-  final distinctJs = distinctBy.isNotEmpty ? _buildDistinct(distinctBy) : null;
-
-  final queryJs = QueryJs(
-    col.native,
-    whereClausesJs,
-    whereDistinct,
-    whereSort == Sort.asc,
-    filterJs,
-    sortJs,
-    distinctJs,
-    offset,
-    limit,
+  return _WasmQuery<T, OBJ>(
+    collection: collection,
+    whereClauses: whereClauses,
+    whereDistinct: whereDistinct,
+    whereSort: whereSort,
+    filter: filter,
+    sortBy: sortBy,
+    distinctBy: distinctBy,
+    offset: offset,
+    limit: limit,
+    property: property,
   );
-
-  QueryDeserialize<T> deserialize;
-  //if (property == null) {
-  deserialize = col.deserializeObject as T Function(Object);
-  /*} else {
-    deserialize = (jsObj) => col.schema.deserializeProp(jsObj, property) as T;
-  }*/
-
-  return QueryImpl<T>(col, queryJs, deserialize, property);
 }
 
-dynamic _valueToJs(dynamic value) {
-  if (value == null) {
-    return double.negativeInfinity;
-  } else if (value == true) {
-    return 1;
-  } else if (value == false) {
-    return 0;
-  } else if (value is DateTime) {
-    return value.toUtc().millisecondsSinceEpoch;
-  } else if (value is List) {
-    return value.map(_valueToJs).toList();
-  } else {
-    return value;
-  }
-}
+class _WasmQuery<T, OBJ> extends Query<T> {
+  _WasmQuery({
+    required this.collection,
+    required this.whereClauses,
+    required this.whereDistinct,
+    required this.whereSort,
+    required this.filter,
+    required this.sortBy,
+    required this.distinctBy,
+    required this.offset,
+    required this.limit,
+    required this.property,
+  });
 
-IdWhereClauseJs _buildIdWhereClause(IdWhereClause wc) {
-  return IdWhereClauseJs()
-    ..range = _buildKeyRange(
-      wc.lower,
-      wc.upper,
-      wc.includeLower,
-      wc.includeUpper,
-    );
-}
+  final IsarCollectionImpl<OBJ> collection;
+  final List<WhereClause> whereClauses;
+  final bool whereDistinct;
+  final Sort whereSort;
+  final FilterOperation? filter;
+  final List<SortProperty> sortBy;
+  final List<DistinctProperty> distinctBy;
+  final int? offset;
+  final int? limit;
+  final String? property;
 
-IndexWhereClauseJs _buildIndexWhereClause(
-  CollectionSchema<dynamic> schema,
-  IndexWhereClause wc,
-) {
-  final index = schema.index(wc.indexName);
+  IsarImpl get isar => collection.isar;
+  String get tableName => collection.name;
 
-  final lower = wc.lower?.toList();
-  final upper = wc.upper?.toList();
-  if (upper != null) {
-    while (index.properties.length > upper.length) {
-      upper.add([]);
+  // ── SQL generation ─────────────────────────────────────────────────
+
+  String _buildSelectSql({String select = '*'}) {
+    final buf = StringBuffer('SELECT $select FROM "$tableName"');
+
+    // WHERE clauses
+    final conditions = _buildWhereConditions();
+    if (conditions.isNotEmpty) {
+      buf.write(' WHERE ${conditions.join(" AND ")}');
     }
-  }
 
-  dynamic lowerUnwrapped = wc.lower;
-  if (index.properties.length == 1 && lower != null) {
-    lowerUnwrapped = lower.isNotEmpty ? lower[0] : null;
-  }
-
-  dynamic upperUnwrapped = upper;
-  if (index.properties.length == 1 && upper != null) {
-    upperUnwrapped = upper.isNotEmpty ? upper[0] : double.infinity;
-  }
-
-  return IndexWhereClauseJs()
-    ..indexName = wc.indexName
-    ..range = _buildKeyRange(
-      wc.lower != null ? _valueToJs(lowerUnwrapped) : null,
-      wc.upper != null ? _valueToJs(upperUnwrapped) : null,
-      wc.includeLower,
-      wc.includeUpper,
-    );
-}
-
-LinkWhereClauseJs _buildLinkWhereClause(
-  IsarCollectionImpl<dynamic> col,
-  LinkWhereClause wc,
-) {
-  // ignore: unused_local_variable
-  final linkCol = col.isar.getCollectionByNameInternal(wc.linkCollection)!
-      as IsarCollectionImpl;
-  //final backlinkLinkName = linkCol.schema.backlinkLinkNames[wc.linkName];
-  return LinkWhereClauseJs()
-    ..linkCollection = wc.linkCollection
-    //..linkName = backlinkLinkName ?? wc.linkName
-    //..backlink = backlinkLinkName != null
-    ..id = wc.id;
-}
-
-KeyRange? _buildKeyRange(
-  dynamic lower,
-  dynamic upper,
-  bool includeLower,
-  bool includeUpper,
-) {
-  if (lower != null) {
-    if (upper != null) {
-      final boundsEqual = idbCmp(lower, upper) == 0;
-      if (boundsEqual) {
-        if (includeLower && includeUpper) {
-          return KeyRange.only(lower);
-        } else {
-          // empty range
-          return KeyRange.upperBound(double.negativeInfinity, true);
-        }
+    // ORDER BY
+    final orderParts = <String>[];
+    if (sortBy.isNotEmpty) {
+      for (final sort in sortBy) {
+        final dir = sort.sort == Sort.asc ? 'ASC' : 'DESC';
+        orderParts.add('"${sort.property}" $dir');
       }
-
-      return KeyRange.bound(lower, upper, !includeLower, !includeUpper);
     } else {
-      return KeyRange.lowerBound(lower, !includeLower);
+      final dir = whereSort == Sort.asc ? 'ASC' : 'DESC';
+      orderParts.add('_id $dir');
     }
-  } else if (upper != null) {
-    return KeyRange.upperBound(upper, !includeUpper);
-  }
-  return null;
-}
+    buf.write(' ORDER BY ${orderParts.join(", ")}');
 
-FilterJs? _buildFilter(
-  CollectionSchema<dynamic> schema,
-  FilterOperation filter,
-) {
-  final filterStr = _buildFilterOperation(schema, filter);
-  if (filterStr != null) {
-    return FilterJs('id', 'obj', 'return $filterStr');
-  } else {
-    return null;
-  }
-}
+    // LIMIT / OFFSET
+    if (limit != null) buf.write(' LIMIT $limit');
+    if (offset != null) buf.write(' OFFSET $offset');
 
-String? _buildFilterOperation(
-  CollectionSchema<dynamic> schema,
-  FilterOperation filter,
-) {
-  if (filter is FilterGroup) {
-    return _buildFilterGroup(schema, filter);
-  } else if (filter is LinkFilter) {
-    unsupportedOnWeb();
-  } else if (filter is FilterCondition) {
-    return _buildCondition(schema, filter);
-  } else {
-    return null;
-  }
-}
-
-String? _buildFilterGroup(CollectionSchema<dynamic> schema, FilterGroup group) {
-  final builtConditions = group.filters
-      .map((op) => _buildFilterOperation(schema, op))
-      .where((e) => e != null)
-      .toList();
-
-  if (builtConditions.isEmpty) {
-    return null;
+    buf.write(';');
+    return buf.toString();
   }
 
-  if (group.type == FilterGroupType.not) {
-    return '!(${builtConditions[0]})';
-  } else if (builtConditions.length == 1) {
-    return builtConditions[0];
-  } else if (group.type == FilterGroupType.xor) {
-    final conditions = builtConditions.join(',');
-    return 'IsarQuery.xor($conditions)';
-  } else {
-    final op = group.type == FilterGroupType.or ? '||' : '&&';
-    final condition = builtConditions.join(op);
-    return '($condition)';
-  }
-}
+  List<String> _buildWhereConditions() {
+    final conditions = <String>[];
 
-String _buildCondition(
-  CollectionSchema<dynamic> schema,
-  FilterCondition condition,
-) {
-  dynamic prepareFilterValue(dynamic value) {
-    if (value == null) {
-      return null;
-    } else if (value is String) {
-      return stringify(value);
+    // WhereClause → range conditions on _id or indexed columns
+    for (final wc in whereClauses) {
+      if (wc.indexName == null) {
+        // Id-based where clause
+        if (wc.lower != null && wc.lower!.isNotEmpty) {
+          final op = wc.includeLower ? '>=' : '>';
+          conditions.add('_id $op ${wc.lower![0]}');
+        }
+        if (wc.upper != null && wc.upper!.isNotEmpty) {
+          final op = wc.includeUpper ? '<=' : '<';
+          conditions.add('_id $op ${wc.upper![0]}');
+        }
+      } else {
+        // Index-based where clause
+        if (wc.lower != null) {
+          for (var i = 0; i < wc.lower!.length; i++) {
+            final value = wc.lower![i];
+            final op = wc.includeLower ? '>=' : '>';
+            conditions.add(_formatCondition(wc.indexName!, i, op, value));
+          }
+        }
+        if (wc.upper != null) {
+          for (var i = 0; i < wc.upper!.length; i++) {
+            final value = wc.upper![i];
+            final op = wc.includeUpper ? '<=' : '<';
+            conditions.add(_formatCondition(wc.indexName!, i, op, value));
+          }
+        }
+      }
+    }
+
+    // Filter → SQL WHERE
+    if (filter != null) {
+      final filterSql = _filterToSql(filter!);
+      if (filterSql.isNotEmpty) {
+        conditions.add(filterSql);
+      }
+    }
+
+    return conditions;
+  }
+
+  String _formatCondition(String indexName, int propIndex, String op, dynamic value) {
+    // Resolve the property name from the index schema
+    final indexSchema = collection.schema.indexes
+        .firstWhere((idx) => idx.name == indexName);
+    final propName = propIndex < indexSchema.properties.length
+        ? indexSchema.properties[propIndex].name
+        : indexName;
+
+    if (value is String) {
+      return '"$propName" $op \'${_escapeSql(value)}\'';
+    } else if (value == null) {
+      return '"$propName" IS NULL';
     } else {
-      return _valueToJs(value);
+      return '"$propName" $op $value';
     }
   }
 
-  final isListOp = condition.type != FilterConditionType.isNull &&
-      condition.type != FilterConditionType.listLength &&
-      schema.property(condition.property).type.isList;
-  final accessor =
-      condition.property == schema.idName ? 'id' : 'obj.${condition.property}';
-  final variable = isListOp ? 'e' : accessor;
-
-  final cond = _buildConditionInternal(
-    conditionType: condition.type,
-    variable: variable,
-    val1: prepareFilterValue(condition.value1),
-    include1: condition.include1,
-    val2: prepareFilterValue(condition.value2),
-    include2: condition.include2,
-    caseSensitive: condition.caseSensitive,
-  );
-
-  if (isListOp) {
-    return '(Array.isArray($accessor) && $accessor.some(e => $cond))';
-  } else {
-    return cond;
-  }
-}
-
-String _buildConditionInternal({
-  required FilterConditionType conditionType,
-  required String variable,
-  required Object? val1,
-  required bool include1,
-  required Object? val2,
-  required bool include2,
-  required bool caseSensitive,
-}) {
-  final isNull = '($variable == null || $variable === -Infinity)';
-  switch (conditionType) {
-    case FilterConditionType.equalTo:
-      if (val1 == null) {
-        return isNull;
-      } else if (val1 is String && !caseSensitive) {
-        return '$variable?.toLowerCase() === ${val1.toLowerCase()}';
-      } else {
-        return '$variable === $val1';
-      }
-    case FilterConditionType.between:
-      final val = val1 ?? val2;
-      final lowerOp = include1 ? '>=' : '>';
-      final upperOp = include2 ? '<=' : '<';
-      if (val == null) {
-        return isNull;
-      } else if ((val1 is String?) && (val2 is String?) && !caseSensitive) {
-        final lower = val1?.toLowerCase() ?? '-Infinity';
-        final upper = val2?.toLowerCase() ?? '-Infinity';
-        final variableLc = '$variable?.toLowerCase() ?? -Infinity';
-        final lowerCond = 'indexedDB.cmp($variableLc, $lower) $lowerOp 0';
-        final upperCond = 'indexedDB.cmp($variableLc, $upper) $upperOp 0';
-        return '($lowerCond && $upperCond)';
-      } else {
-        final lowerCond =
-            'indexedDB.cmp($variable, ${val1 ?? '-Infinity'}) $lowerOp 0';
-        final upperCond =
-            'indexedDB.cmp($variable, ${val2 ?? '-Infinity'}) $upperOp 0';
-        return '($lowerCond && $upperCond)';
-      }
-    case FilterConditionType.lessThan:
-      if (val1 == null) {
-        if (include1) {
-          return isNull;
-        } else {
-          return 'false';
-        }
-      } else {
-        final op = include1 ? '<=' : '<';
-        if (val1 is String && !caseSensitive) {
-          return 'indexedDB.cmp($variable?.toLowerCase() ?? '
-              '-Infinity, ${val1.toLowerCase()}) $op 0';
-        } else {
-          return 'indexedDB.cmp($variable, $val1) $op 0';
-        }
-      }
-    case FilterConditionType.greaterThan:
-      if (val1 == null) {
-        if (include1) {
-          return 'true';
-        } else {
-          return '!$isNull';
-        }
-      } else {
-        final op = include1 ? '>=' : '>';
-        if (val1 is String && !caseSensitive) {
-          return 'indexedDB.cmp($variable?.toLowerCase() ?? '
-              '-Infinity, ${val1.toLowerCase()}) $op 0';
-        } else {
-          return 'indexedDB.cmp($variable, $val1) $op 0';
-        }
-      }
-    case FilterConditionType.startsWith:
-    case FilterConditionType.endsWith:
-    case FilterConditionType.contains:
-      final op = conditionType == FilterConditionType.startsWith
-          ? 'startsWith'
-          : conditionType == FilterConditionType.endsWith
-              ? 'endsWith'
-              : 'includes';
-      if (val1 is String) {
-        final isString = 'typeof $variable == "string"';
-        if (!caseSensitive) {
-          return '($isString && $variable.toLowerCase() '
-              '.$op(${val1.toLowerCase()}))';
-        } else {
-          return '($isString && $variable.$op($val1))';
-        }
-      } else {
-        throw IsarError('Unsupported type for condition');
-      }
-    case FilterConditionType.matches:
-      throw UnimplementedError();
-    case FilterConditionType.isNull:
-      return isNull;
-    // ignore: no_default_cases
-    default:
-      throw UnimplementedError();
-  }
-}
-
-SortCmpJs _buildSort(List<SortProperty> properties) {
-  final sort = properties.map((e) {
-    final op = e.sort == Sort.asc ? '' : '-';
-    return '${op}indexedDB.cmp(a.${e.property} ?? "-Infinity", b.${e.property} '
-        '?? "-Infinity")';
-  }).join('||');
-  return SortCmpJs('a', 'b', 'return $sort');
-}
-
-DistinctValueJs _buildDistinct(List<DistinctProperty> properties) {
-  final distinct = properties.map((e) {
-    if (e.caseSensitive == false) {
-      return 'obj.${e.property}?.toLowerCase() ?? "-Infinity"';
-    } else {
-      return 'obj.${e.property}?.toString() ?? "-Infinity"';
+  String _filterToSql(FilterOperation filter) {
+    if (filter is FilterGroup) {
+      final parts = filter.filters.map(_filterToSql).where((s) => s.isNotEmpty).toList();
+      if (parts.isEmpty) return '';
+      final joiner = filter.type == FilterGroupType.and ? ' AND ' : ' OR ';
+      final expr = parts.join(joiner);
+      if (filter.not) return 'NOT ($expr)';
+      return '($expr)';
+    } else if (filter is FilterCondition) {
+      return _conditionToSql(filter);
     }
-  }).join('+');
-  return DistinctValueJs('obj', 'return $distinct');
+    return '';
+  }
+
+  String _conditionToSql(FilterCondition cond) {
+    final prop = '"${cond.property}"';
+
+    switch (cond.type) {
+      case ConditionType.eq:
+        if (cond.value1 == null) return '$prop IS NULL';
+        return '$prop = ${_sqlValue(cond.value1)}';
+      case ConditionType.gt:
+        return '$prop > ${_sqlValue(cond.value1)}';
+      case ConditionType.gte:
+        return '$prop >= ${_sqlValue(cond.value1)}';
+      case ConditionType.lt:
+        return '$prop < ${_sqlValue(cond.value1)}';
+      case ConditionType.lte:
+        return '$prop <= ${_sqlValue(cond.value1)}';
+      case ConditionType.between:
+        return '$prop BETWEEN ${_sqlValue(cond.value1)} AND ${_sqlValue(cond.value2)}';
+      case ConditionType.startsWith:
+        return '$prop LIKE \'${_escapeSql(cond.value1.toString())}%\'';
+      case ConditionType.endsWith:
+        return '$prop LIKE \'%${_escapeSql(cond.value1.toString())}\'';
+      case ConditionType.contains:
+        return '$prop LIKE \'%${_escapeSql(cond.value1.toString())}%\'';
+      case ConditionType.matches:
+        // Isar wildcard pattern: * → %, ? → _
+        final pattern = cond.value1
+            .toString()
+            .replaceAll('*', '%')
+            .replaceAll('?', '_');
+        return '$prop LIKE \'${_escapeSql(pattern)}\'';
+      case ConditionType.isNull:
+        return '$prop IS NULL';
+      case ConditionType.isNotNull:
+        return '$prop IS NOT NULL';
+      default:
+        return '';
+    }
+  }
+
+  String _sqlValue(dynamic value) {
+    if (value == null) return 'NULL';
+    if (value is String) return '\'${_escapeSql(value)}\'';
+    if (value is DateTime) return '${value.millisecondsSinceEpoch}';
+    return value.toString();
+  }
+
+  // ── Query execution ────────────────────────────────────────────────
+
+  @override
+  Future<T?> findFirst() {
+    return isar.getTxn(false, (txn) async {
+      final sql = _buildSelectSql().replaceFirst(';', ' LIMIT 1;');
+      final json = isarQueryJs(isar.instance, txn, sql.toJS).toDart;
+      final list = jsonDecode(json) as List<dynamic>;
+      if (list.isEmpty) return null;
+      return collection._deserializeFromJson(
+        list[0] as Map<String, dynamic>,
+      ) as T?;
+    });
+  }
+
+  @override
+  T? findFirstSync() => unsupportedOnWeb();
+
+  @override
+  Future<List<T>> findAll() {
+    return isar.getTxn(false, (txn) async {
+      final sql = _buildSelectSql();
+      final json = isarQueryJs(isar.instance, txn, sql.toJS).toDart;
+      final list = jsonDecode(json) as List<dynamic>;
+
+      if (property != null) {
+        // Property projection
+        return list.map((row) {
+          final map = row as Map<String, dynamic>;
+          return map[property] as T;
+        }).toList();
+      }
+
+      return list.map((item) {
+        return collection._deserializeFromJson(
+          item as Map<String, dynamic>,
+        ) as T;
+      }).toList();
+    });
+  }
+
+  @override
+  List<T> findAllSync() => unsupportedOnWeb();
+
+  @override
+  Future<int> deleteFirst() {
+    return isar.getTxn(true, (txn) async {
+      // Find the first matching id, then delete it
+      final selectSql = _buildSelectSql(select: '_id')
+          .replaceFirst(';', ' LIMIT 1;');
+      final json = isarQueryJs(isar.instance, txn, selectSql.toJS).toDart;
+      final list = jsonDecode(json) as List<dynamic>;
+      if (list.isEmpty) return 0;
+      final id = (list[0] as Map<String, dynamic>)['_id'];
+      final deleteSql = 'DELETE FROM "$tableName" WHERE _id = $id;';
+      return isarDeleteQueryJs(isar.instance, txn, deleteSql.toJS).toDartInt;
+    });
+  }
+
+  @override
+  int deleteFirstSync() => unsupportedOnWeb();
+
+  @override
+  Future<int> deleteAll() {
+    return isar.getTxn(true, (txn) async {
+      final conditions = _buildWhereConditions();
+      final where =
+          conditions.isEmpty ? '' : ' WHERE ${conditions.join(" AND ")}';
+      final sql = 'DELETE FROM "$tableName"$where;';
+      return isarDeleteQueryJs(isar.instance, txn, sql.toJS).toDartInt;
+    });
+  }
+
+  @override
+  int deleteAllSync() => unsupportedOnWeb();
+
+  // ── Aggregates ─────────────────────────────────────────────────────
+
+  @override
+  Future<R> aggregate<R>(AggregationOp op) {
+    return isar.getTxn(false, (txn) async {
+      final conditions = _buildWhereConditions();
+      final where =
+          conditions.isEmpty ? '' : ' WHERE ${conditions.join(" AND ")}';
+
+      late final String sql;
+      switch (op) {
+        case AggregationOp.count:
+          sql = 'SELECT COUNT(*) FROM "$tableName"$where;';
+          break;
+        case AggregationOp.isEmpty:
+          sql = 'SELECT COUNT(*) FROM "$tableName"$where LIMIT 1;';
+          break;
+        case AggregationOp.min:
+          sql = 'SELECT MIN("${property ?? "_id"}") FROM "$tableName"$where;';
+          break;
+        case AggregationOp.max:
+          sql = 'SELECT MAX("${property ?? "_id"}") FROM "$tableName"$where;';
+          break;
+        case AggregationOp.sum:
+          sql = 'SELECT SUM("${property ?? "_id"}") FROM "$tableName"$where;';
+          break;
+        case AggregationOp.average:
+          sql = 'SELECT AVG("${property ?? "_id"}") FROM "$tableName"$where;';
+          break;
+      }
+
+      final json = isarAggregateJs(isar.instance, txn, sql.toJS).toDart;
+      final value = jsonDecode(json);
+
+      if (op == AggregationOp.isEmpty) {
+        return (value == 0) as R;
+      }
+      if (op == AggregationOp.count) {
+        return (value as num).toInt() as R;
+      }
+      return value as R;
+    });
+  }
+
+  // ── Watch (stub) ───────────────────────────────────────────────────
+
+  @override
+  Stream<List<T>> watch({bool fireImmediately = false}) {
+    // TODO: Implement via polling
+    return const Stream.empty();
+  }
+
+  @override
+  Stream<void> watchLazy({bool fireImmediately = false}) {
+    // TODO: Implement via polling
+    return const Stream.empty();
+  }
 }
+
+String _escapeSql(String value) => value.replaceAll("'", "''");

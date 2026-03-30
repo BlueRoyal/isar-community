@@ -1,43 +1,79 @@
 // ignore_for_file: public_member_api_docs, invalid_use_of_protected_member
+//
+// WASM-based database opening for isar_community web.
+//
+// Replaces the old JS/IndexedDB approach with a sqlite-wasm-rs backend
+// loaded via a WASM module.
 
-import 'dart:html';
-//import 'dart:js_util';
+import 'dart:async';
+import 'dart:convert';
+import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
 import 'package:isar_community/isar.dart';
-/*import 'package:isar_community/src/common/schemas.dart';
-
+import 'package:isar_community/src/common/schemas.dart';
 import 'package:isar_community/src/web/bindings.dart';
 import 'package:isar_community/src/web/isar_collection_impl.dart';
-import 'package:isar_community/src/web/isar_impl.dart';*/
+import 'package:isar_community/src/web/isar_impl.dart';
 import 'package:isar_community/src/web/isar_web.dart';
 import 'package:meta/meta.dart';
 
-bool _loaded = false;
-Future<void> initializeIsarWeb([String? jsUrl]) async {
-  if (_loaded) {
-    return;
-  }
-  _loaded = true;
+bool _wasmLoaded = false;
 
-  final script = ScriptElement();
-  script.type = 'text/javascript';
-  // ignore: unsafe_html
-  script.src = 'https://unpkg.com/isar@${Isar.version}/dist/index.js';
-  script.async = true;
-  document.head!.append(script);
-  await script.onLoad.first.timeout(
-    const Duration(seconds: 30),
-    onTimeout: () {
-      throw IsarError('Failed to load Isar');
-    },
-  );
+/// Load the isar-wasm ES module and initialise the WASM runtime.
+///
+/// Call this once before opening any Isar instance.  The WASM binary
+/// (`isar_wasm_bg.wasm`) and JS glue (`isar_wasm.js`) must be served
+/// from the application's `web/` directory.
+///
+/// [wasmUrl] allows overriding the default path (e.g. for CDN hosting).
+Future<void> initializeIsarWeb([String? wasmUrl]) async {
+  if (_wasmLoaded) return;
+
+  final url = wasmUrl ?? 'isar_wasm.js';
+
+  // Dynamically import the ES module produced by wasm-pack.
+  // This works in modern browsers supporting <script type="module">.
+  final module = await _importModule(url);
+  if (module == null) {
+    throw IsarError(
+      'Failed to load isar-wasm module from "$url". '
+      'Make sure the WASM build output (pkg/) is copied to your web/ directory.',
+    );
+  }
+
+  // Call the default init() export which fetches & instantiates the .wasm
+  final initFn = module.getProperty('default'.toJS);
+  if (initFn != null) {
+    final result = (initFn as JSFunction).callAsFunction();
+    if (result is JSPromise) {
+      await result.toDart;
+    }
+  }
+
+  // Call isarInit() to set up panic hooks etc.
+  isarInitJs();
+
+  // Verify version compatibility
+  final wasmVersion = isarVersion();
+  if (wasmVersion != Isar.version) {
+    throw IsarError(
+      'Isar WASM version mismatch: Dart package expects ${Isar.version} '
+      'but WASM module is $wasmVersion. '
+      'Please rebuild the WASM module with the matching version.',
+    );
+  }
+
+  _wasmLoaded = true;
 }
 
+/// Allows tests to skip the WASM loading step.
 @visibleForTesting
 void doNotInitializeIsarWeb() {
-  _loaded = true;
+  _wasmLoaded = true;
 }
 
+/// Open an Isar database instance backed by WASM SQLite.
 Future<Isar> openIsar({
   required List<CollectionSchema<dynamic>> schemas,
   String? directory,
@@ -46,31 +82,35 @@ Future<Isar> openIsar({
   required bool relaxedDurability,
   CompactCondition? compactOnLaunch,
 }) async {
-  throw IsarError(
-    'Please use Isar 2.5.0 if you need web support. '
-    'A 3.x version with web support will be released soon.',
-  );
-  /*await initializeIsarWeb();
+  await initializeIsarWeb();
+
+  // Serialise schemas to JSON for the Rust side
   final schemasJson = getSchemas(schemas).map((e) => e.toJson());
-  final schemasJs = jsify(schemasJson.toList()) as List<dynamic>;
-  final instance = await openIsarJs(name, schemasJs, relaxedDurability)
-      .wait<IsarInstanceJs>();
+  final schemasJsonStr = jsonEncode(schemasJson.toList());
+
+  // Open the WASM-backed database
+  final instance = openIsarJs(
+    name.toJS,
+    schemasJsonStr.toJS,
+    relaxedDurability.toJS,
+  );
+
+  // Build the Dart-side Isar object
   final isar = IsarImpl(name, instance);
   final cols = <Type, IsarCollection<dynamic>>{};
+
   for (final schema in schemas) {
-    final col = instance.getCollection(schema.name);
     schema.toCollection(<OBJ>() {
       schema as CollectionSchema<OBJ>;
       cols[OBJ] = IsarCollectionImpl<OBJ>(
         isar: isar,
-        native: col,
         schema: schema,
       );
     });
   }
 
   isar.attachCollections(cols);
-  return isar;*/
+  return isar;
 }
 
 Isar openIsarSync({
@@ -82,3 +122,26 @@ Isar openIsarSync({
   CompactCondition? compactOnLaunch,
 }) =>
     unsupportedOnWeb();
+
+FutureOr<void> initializeCoreBinary({
+  Map<IsarAbi, String> libraries = const {},
+  bool download = false,
+}) =>
+    unsupportedOnWeb();
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+/// Dynamically import an ES module via `import()`.
+Future<JSObject?> _importModule(String url) async {
+  try {
+    // Use the browser's native dynamic import()
+    final promise = globalContext.callMethod(
+      'eval'.toJS,
+      'import("$url")'.toJS,
+    ) as JSPromise;
+    final module = await promise.toDart;
+    return module as JSObject?;
+  } catch (e) {
+    return null;
+  }
+}

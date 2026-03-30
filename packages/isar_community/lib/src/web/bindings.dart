@@ -1,188 +1,132 @@
 // ignore_for_file: public_member_api_docs
+//
+// JS interop bindings for the isar-wasm WASM module.
+//
+// These replace the old IndexedDB-based bindings.  Every function here
+// corresponds to a #[wasm_bindgen] export in the Rust crate.
 
-import 'dart:indexed_db';
-import 'dart:js';
+import 'dart:js_interop';
 
-import 'package:isar_community/isar.dart';
-import 'package:js/js.dart';
-import 'package:js/js_util.dart';
+// ── Module initialisation ────────────────────────────────────────────
 
-@JS('JSON.stringify')
-external String stringify(dynamic value);
+@JS('isarInit')
+external void isarInitJs();
 
-@JS('indexedDB.cmp')
-external int idbCmp(dynamic value1, dynamic value2);
+@JS('isarVersion')
+external JSString isarVersionJs();
 
-@JS('Object.keys')
-external List<String> objectKeys(dynamic obj);
+String isarVersion() => isarVersionJs().toDart;
 
-Map<String, dynamic> jsMapToDart(Object obj) {
-  final keys = objectKeys(obj);
-  final map = <String, dynamic>{};
-  for (final key in keys) {
-    map[key] = getProperty<dynamic>(obj, key);
-  }
-  return map;
-}
-
-@JS('Promise')
-class Promise {}
-
-extension PromiseX on Promise {
-  Future<T> wait<T>() => promiseToFuture(this);
-}
+// ── Instance lifecycle ───────────────────────────────────────────────
 
 @JS('openIsar')
-external Promise openIsarJs(
-  String name,
-  List<dynamic> schemas,
-  bool relaxedDurability,
+external IsarInstanceJs openIsarJs(
+  JSString name,
+  JSString schemasJson,
+  JSBoolean relaxedDurability,
 );
 
-@JS('IsarTxn')
-class IsarTxnJs {
-  external Promise commit();
+@JS('closeIsar')
+external void closeIsarJs(IsarInstanceJs instance, JSBoolean deleteFromDisk);
 
+/// Opaque handle to a WASM-side IsarInstance.
+extension type IsarInstanceJs(JSObject _) implements JSObject {
+  external JSString get name;
+}
+
+// ── Transactions ─────────────────────────────────────────────────────
+
+@JS('isarBeginTxn')
+external IsarTxnJs isarBeginTxnJs(IsarInstanceJs instance, JSBoolean write);
+
+/// Opaque transaction handle.
+extension type IsarTxnJs(JSObject _) implements JSObject {
+  external JSBoolean get write;
+  external void commit();
   external void abort();
-
-  external bool get write;
 }
 
-@JS('IsarInstance')
-class IsarInstanceJs {
-  external IsarTxnJs beginTxn(bool write);
+// ── Collection CRUD ──────────────────────────────────────────────────
 
-  external IsarCollectionJs getCollection(String name);
+@JS('isarGetAll')
+external JSString isarGetAllJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString collectionName,
+  JSString idsJson,
+);
 
-  external Promise close(bool deleteFromDisk);
-}
+@JS('isarPutAll')
+external JSString isarPutAllJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString collectionName,
+  JSString objectsJson,
+);
 
-typedef ChangeCallbackJs = void Function();
+@JS('isarDeleteAll')
+external JSNumber isarDeleteAllJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString collectionName,
+  JSString idsJson,
+);
 
-typedef ObjectChangeCallbackJs = void Function(Object? object);
+@JS('isarClear')
+external void isarClearJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString collectionName,
+);
 
-typedef QueryChangeCallbackJs = void Function(List<dynamic> results);
+@JS('isarCount')
+external JSNumber isarCountJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString collectionName,
+);
 
-typedef StopWatchingJs = JsFunction;
+// ── Query execution ──────────────────────────────────────────────────
 
-@JS('IsarCollection')
-class IsarCollectionJs {
-  external IsarLinkJs getLink(String name);
+@JS('isarQuery')
+external JSString isarQueryJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString sql,
+);
 
-  external Promise getAll(IsarTxnJs txn, List<Id> ids);
+@JS('isarAggregate')
+external JSString isarAggregateJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString sql,
+);
 
-  external Promise getAllByIndex(
-    IsarTxnJs txn,
-    String indexName,
-    List<List<dynamic>> values,
-  );
+@JS('isarDeleteQuery')
+external JSNumber isarDeleteQueryJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString sql,
+);
 
-  external Promise putAll(IsarTxnJs txn, List<dynamic> objects);
+// ── Link operations ──────────────────────────────────────────────────
 
-  external Promise deleteAll(IsarTxnJs txn, List<Id> ids);
+@JS('isarLinkUpdate')
+external void isarLinkUpdateJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString sourceCollection,
+  JSString linkName,
+  JSNumber sourceId,
+  JSString addTargetIdsJson,
+  JSString removeTargetIdsJson,
+);
 
-  external Promise deleteAllByIndex(
-    IsarTxnJs txn,
-    String indexName,
-    List<dynamic> keys,
-  );
-
-  external Promise clear(IsarTxnJs txn);
-
-  external StopWatchingJs watchLazy(ChangeCallbackJs callback);
-
-  external StopWatchingJs watchObject(Id id, ObjectChangeCallbackJs callback);
-
-  external StopWatchingJs watchQuery(
-    QueryJs query,
-    QueryChangeCallbackJs callback,
-  );
-
-  external StopWatchingJs watchQueryLazy(
-    QueryJs query,
-    ChangeCallbackJs callback,
-  );
-}
-
-@JS('IsarLink')
-class IsarLinkJs {
-  external Promise update(
-    IsarTxnJs txn,
-    bool backlink,
-    Id id,
-    List<Id> addedTargets,
-    List<Id> deletedTargets,
-  );
-
-  external Promise clear(IsarTxnJs txn, Id id, bool backlink);
-}
-
-@JS('IdWhereClause')
-@anonymous
-class IdWhereClauseJs {
-  external KeyRange? range;
-}
-
-@JS('IndexWhereClause')
-@anonymous
-class IndexWhereClauseJs {
-  external String indexName;
-  external KeyRange? range;
-}
-
-@JS('LinkWhereClause')
-@anonymous
-class LinkWhereClauseJs {
-  external String linkCollection;
-  external String linkName;
-  external bool backlink;
-  external Id id;
-}
-
-@JS('Function')
-class FilterJs {
-  external FilterJs(String id, String obj, String method);
-}
-
-@JS('Function')
-class SortCmpJs {
-  external SortCmpJs(String a, String b, String method);
-}
-
-@JS('Function')
-class DistinctValueJs {
-  external DistinctValueJs(String obj, String method);
-}
-
-@JS('IsarQuery')
-class QueryJs {
-  external QueryJs(
-    IsarCollectionJs collection,
-    List<dynamic> whereClauses,
-    bool whereDistinct,
-    bool whereAscending,
-    FilterJs? filter,
-    SortCmpJs? sortCmp,
-    DistinctValueJs? distinctValue,
-    int? offset,
-    int? limit,
-  );
-
-  external Promise findFirst(IsarTxnJs txn);
-
-  external Promise findAll(IsarTxnJs txn);
-
-  external Promise deleteFirst(IsarTxnJs txn);
-
-  external Promise deleteAll(IsarTxnJs txn);
-
-  external Promise min(IsarTxnJs txn, String propertyName);
-
-  external Promise max(IsarTxnJs txn, String propertyName);
-
-  external Promise sum(IsarTxnJs txn, String propertyName);
-
-  external Promise average(IsarTxnJs txn, String propertyName);
-
-  external Promise count(IsarTxnJs txn);
-}
+@JS('isarLinkClear')
+external void isarLinkClearJs(
+  IsarInstanceJs instance,
+  IsarTxnJs txn,
+  JSString sourceCollection,
+  JSString linkName,
+  JSNumber sourceId,
+);

@@ -1,0 +1,39 @@
+[package]
+name = "isar-wasm"
+version = "3.3.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/isar-community/isar-community"
+description = "Isar Community WASM — SQLite-backed web storage for isar_community v3"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+  "console",
+  "Window",
+  "Navigator",
+] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde-wasm-bindgen = "0.6"
+
+# SQLite for WASM
+sqlite-wasm-rs = { version = "0.3", features = ["bundled"] }
+
+# Shared with isar_core
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dependencies.console_error_panic_hook]
+version = "0.1"
+optional = true
+
+[features]
+default = ["console_error_panic_hook"]

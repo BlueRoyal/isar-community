@@ -1,10 +1,15 @@
 // ignore_for_file: public_member_api_docs
+//
+// Isar instance implementation for WASM/web.
+//
+// Transactions are synchronous because sqlite-wasm-rs operations
+// complete within the same microtask.  The Dart async API wraps
+// them in Futures for API compatibility with native.
 
 import 'dart:async';
-import 'dart:html';
+import 'dart:js_interop';
 
 import 'package:isar_community/isar.dart';
-
 import 'package:isar_community/src/web/bindings.dart';
 import 'package:isar_community/src/web/isar_web.dart';
 
@@ -28,6 +33,8 @@ class IsarImpl extends Isar {
     }
   }
 
+  // ── Transaction management ───────────────────────────────────────
+
   Future<T> _txn<T>(
     bool write,
     bool silent,
@@ -39,25 +46,17 @@ class IsarImpl extends Isar {
     final completer = Completer<void>();
     _activeAsyncTxns.add(completer.future);
 
-    final txn = instance.beginTxn(write);
+    final txn = isarBeginTxnJs(instance, write.toJS);
 
     final zone = Zone.current.fork(zoneValues: {_zoneTxn: txn});
 
     T result;
     try {
       result = await zone.run(callback);
-      await txn.commit().wait<dynamic>();
+      txn.commit();
     } catch (e) {
       txn.abort();
-      if (e is DomException) {
-        if (e.name == DomException.CONSTRAINT) {
-          throw IsarUniqueViolationError();
-        } else {
-          throw IsarError('${e.name}: ${e.message}');
-        }
-      } else {
-        rethrow;
-      }
+      rethrow;
     } finally {
       completer.complete();
       _activeAsyncTxns.remove(completer.future);
@@ -83,10 +82,11 @@ class IsarImpl extends Isar {
   T writeTxnSync<T>(T Function() callback, {bool silent = false}) =>
       unsupportedOnWeb();
 
+  /// Get or create a transaction for internal collection operations.
   Future<T> getTxn<T>(bool write, Future<T> Function(IsarTxnJs txn) callback) {
     final currentTxn = Zone.current[_zoneTxn] as IsarTxnJs?;
     if (currentTxn != null) {
-      if (write && !currentTxn.write) {
+      if (write && !(currentTxn.write.toDart)) {
         throw IsarError(
           'Operation cannot be performed within a read transaction.',
         );
@@ -100,6 +100,8 @@ class IsarImpl extends Isar {
       throw IsarError('Write operations require an explicit transaction.');
     }
   }
+
+  // ── Unsupported on web ────────────────────────────────────────────
 
   @override
   Future<int> getSize({
@@ -115,13 +117,15 @@ class IsarImpl extends Isar {
   @override
   Future<void> copyToFile(String targetPath) => unsupportedOnWeb();
 
+  // ── Close ─────────────────────────────────────────────────────────
+
   @override
   Future<bool> close({bool deleteFromDisk = false}) async {
     requireOpen();
     requireNotInTxn();
     await Future.wait(_activeAsyncTxns);
     await super.close();
-    await instance.close(deleteFromDisk).wait<dynamic>();
+    closeIsarJs(instance, deleteFromDisk.toJS);
     return true;
   }
 

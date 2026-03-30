@@ -16,6 +16,11 @@
 .pub/
 build/
 
+packages/isar_wasm/target/
+packages/isar_wasm/pkg/
+packages/isar_wasm/.cargo/
+*.wasm
+
 # Rust related
 target/
 *.a
