@@ -143,15 +143,19 @@ class _WasmQuery<T, OBJ> extends Query<T> {
     return conditions;
   }
 
-  String _formatValueCondition(String propName, String op, dynamic value) {
-    if (value is String) {
-      return '"$propName" $op \'${_escapeSql(value)}\'';
-    } else if (value == null) {
-      return '"$propName" IS NULL';
-    } else {
-      return '"$propName" $op $value';
-    }
+String _formatValueCondition(String propName, String op, dynamic value) {
+  if (value == null) {
+    return '"$propName" IS NULL';
+  } else if (value is bool) {
+    return '"$propName" $op ${value ? 1 : 0}';
+  } else if (value is Enum) {
+    return '"$propName" $op ${value.index}';
+  } else if (value is String) {
+    return '"$propName" $op \'${_escapeSql(value)}\'';
+  } else {
+    return '"$propName" $op $value';
   }
+}
 
   String _filterToSql(FilterOperation filter) {
     if (filter is FilterGroup) {
@@ -219,12 +223,16 @@ class _WasmQuery<T, OBJ> extends Query<T> {
     }
   }
 
-  String _sqlValue(dynamic value) {
-    if (value == null) return 'NULL';
-    if (value is String) return '\'${_escapeSql(value)}\'';
-    if (value is DateTime) return '${value.millisecondsSinceEpoch}';
-    return value.toString();
-  }
+String _sqlValue(dynamic value) {
+  if (value == null) return 'NULL';
+  if (value is bool) return value ? '1' : '0';
+  if (value is int) return '$value';
+  if (value is double) return '$value';
+  if (value is Enum) return '${value.index}';
+  if (value is String) return '\'${_escapeSql(value)}\'';
+  if (value is DateTime) return '${value.millisecondsSinceEpoch}';
+  return '\'${_escapeSql(value.toString())}\'';
+}
 
   // ── Query execution ────────────────────────────────────────────────
 
