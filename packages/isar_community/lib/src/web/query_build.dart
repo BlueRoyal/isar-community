@@ -366,14 +366,43 @@ class _WasmQuery<T, OBJ> extends Query<T> {
 
   // ── Watch (stub) ───────────────────────────────────────────────────
 
-  @override
-  Stream<List<T>> watch({bool fireImmediately = false}) {
-    return const Stream.empty();
+@override
+Stream<List<T>> watch({bool fireImmediately = false}) {
+  final controller = StreamController<List<T>>();
+
+  // Initiales Laden + periodisches Polling (SQLite hat keine Change-Events)
+  Timer? timer;
+
+  Future<void> poll() async {
+    try {
+      final results = await findAll();
+      if (!controller.isClosed) {
+        controller.add(results);
+      }
+    } catch (e) {
+      if (!controller.isClosed) {
+        controller.addError(e);
+      }
+    }
   }
 
-  @override
-  Stream<void> watchLazy({bool fireImmediately = false}) {
-    return const Stream.empty();
+  controller.onListen = () {
+    if (fireImmediately) poll();
+    // Alle 500ms pollen — für Debugging ausreichend
+    timer = Timer.periodic(const Duration(milliseconds: 500), (_) => poll());
+  };
+
+  controller.onCancel = () {
+    timer?.cancel();
+    controller.close();
+  };
+
+  return controller.stream;
+}
+
+@override
+Stream<void> watchLazy({bool fireImmediately = false}) {
+  return watch(fireImmediately: fireImmediately).map((_) {});
   }
 }
 
