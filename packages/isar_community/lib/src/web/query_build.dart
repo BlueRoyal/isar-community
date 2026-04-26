@@ -1,4 +1,6 @@
-// ignore_for_file: public_member_api_docs, invalid_use_of_protected_member
+// ignore_for_file: public_member_api_docs
+// ignore_for_file: invalid_use_of_protected_member
+// ignore_for_file: deprecated_member_use
 
 /// SQL-generating query builder for the isar_wasm.js (sql.js/SQLite) backend.
 /// Replaces the original IndexedDB-based query_build.dart.
